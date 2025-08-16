@@ -1,4 +1,4 @@
-# Aurora MySQL HLL Generator - Git ignore file
+# MCP Projects - Git ignore file
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -124,7 +124,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Aurora MySQL specific
+# Database specific
 *.cnf
 *.conf
 database_config.yaml
