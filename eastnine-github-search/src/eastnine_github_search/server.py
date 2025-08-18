@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+import json
 
 # Load environment variables (MCP env takes priority over .env file)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -103,12 +104,14 @@ class GitHubSearcher:
         Returns:
             List[Dict[str, Any]]: List of search results from GitHub code search API
         """
-        # GitHub code search API
+        # GitHub code search API with optimized parameters
         search_query = f"repo:{self.username}/{repo_name} {query}"
         url = "https://api.github.com/search/code"
         params = {
             "q": search_query,
-            "per_page": 50
+            "per_page": 100,  # 최대 결과 수
+            "sort": "indexed",  # 최신 인덱싱된 파일 우선
+            "order": "desc"     # 내림차순 정렬
         }
         
         try:
@@ -165,8 +168,22 @@ class GitHubSearcher:
         """Search for scripts using natural language description.
         
         This method searches through all user repositories to find scripts that match
-        the given natural language description. It uses keyword extraction and
-        GitHub code search API to find relevant scripts.
+        the given natural language description using optimized GitHub code search API.
+        
+        Args:
+            description (str): Natural language description of the script to search for
+            
+        Returns:
+            List[Dict[str, Any]]: List of script search results with metadata
+        """
+        # Use optimized single API call method
+        return self.search_scripts_optimized(description)
+    
+    def search_scripts_optimized(self, description: str) -> List[Dict[str, Any]]:
+        """Optimized search for scripts using GitHub code search API.
+        
+        This method searches across all user repositories in a single API call
+        instead of searching each repository individually.
         
         Args:
             description (str): Natural language description of the script to search for
@@ -176,317 +193,80 @@ class GitHubSearcher:
         """
         results = []
         
-        # Get all repositories
-        repos = self.get_user_repositories()
-        
-        # Extract keywords from description
-        keywords = self.extract_keywords(description)
-        
-        for repo in repos:
-            repo_name = repo["name"]
-            
-            # Search using different strategies
-            for keyword in keywords:
-                # Search in code content
-                code_results = self.search_code_in_repo(repo_name, keyword)
-                
-                for item in code_results:
-                    if self.is_script_file(item["name"]):
-                        results.append({
-                            "repository": repo_name,
-                            "file_path": item["path"],
-                            "file_name": item["name"],
-                            "html_url": item["html_url"],
-                            "score": item.get("score", 0),
-                            "matched_keyword": keyword,
-                            "description": repo.get("description", ""),
-                            "language": repo.get("language", "Unknown")
-                        })
-        
-        # Remove duplicates and sort by score
-        unique_results = {}
-        for result in results:
-            key = f"{result['repository']}/{result['file_path']}"
-            if key not in unique_results or result['score'] > unique_results[key]['score']:
-                unique_results[key] = result
-        
-        sorted_results = sorted(unique_results.values(), key=lambda x: x['score'], reverse=True)
-        return sorted_results[:20]  # Return top 20 results
-    
-    def extract_keywords(self, description: str) -> List[str]:
-        """Extract relevant keywords from natural language description.
-        
-        This method processes natural language descriptions to extract meaningful
-        keywords for script search. It includes keyword mapping for common terms
-        and filters out stop words.
-        
-        Args:
-            description (str): Natural language description to extract keywords from
-            
-        Returns:
-            List[str]: List of extracted keywords for search
-        """
-        # Convert to lowercase and remove special characters
-        clean_desc = re.sub(r'[^\w\s]', ' ', description.lower())
-        words = clean_desc.split()
-        
-        # Common programming/script related keywords mapping
-        keyword_mapping = {
-            '압축': ['compress', 'zip', 'archive', 'tar', 'gzip'],
-            '백업': ['backup', 'dump', 'export', 'save'],
-            '데이터베이스': ['database', 'db', 'sql', 'mysql', 'postgres', 'mongodb'],
-            '파일': ['file', 'directory', 'folder', 'path'],
-            '서버': ['server', 'http', 'api', 'web', 'flask', 'django'],
-            '배포': ['deploy', 'deployment', 'build', 'release'],
-            '모니터링': ['monitor', 'log', 'watch', 'alert'],
-            '자동화': ['automation', 'auto', 'cron', 'schedule'],
-            '테스트': ['test', 'testing', 'unit', 'integration'],
-            '설정': ['config', 'configuration', 'setup', 'install'],
+        # Strategy 1: Simple search without extension filtering
+        search_query = f"user:{self.username} {description}"
+        url = "https://api.github.com/search/code"
+        params = {
+            "q": search_query,
+            "per_page": 100,
+            "sort": "indexed",
+            "order": "desc"
         }
         
-        keywords = set()
-        
-        # Add original words
-        keywords.update(words)
-        
-        # Add mapped keywords
-        for word in words:
-            if word in keyword_mapping:
-                keywords.update(keyword_mapping[word])
-        
-        # Filter out common stop words
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
-        keywords = [k for k in keywords if k not in stop_words and len(k) > 2]
-        
-        return list(keywords)
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            items = response.json().get("items", [])
+            
+            for item in items:
+                if self.is_script_file(item["name"]):
+                    # Extract repository name from full_name
+                    repo_name = item["repository"]["name"]
+                    results.append({
+                        "repository": repo_name,
+                        "file_path": item["path"],
+                        "file_name": item["name"],
+                        "html_url": item["html_url"],
+                        "score": item.get("score", 0),
+                        "matched_keyword": description,
+                        "description": item["repository"].get("description", ""),
+                        "language": item["repository"].get("language", "Unknown")
+                    })
+            
+            # If we found results, return them
+            if results:
+                return results[:20]  # Return top 20 results
+            
+            # Strategy 2: If no results, try searching with just keywords
+            keywords = description.split()
+            for keyword in keywords[:3]:  # Try first 3 keywords
+                if len(keyword) > 2:  # Only meaningful keywords
+                    search_query = f"user:{self.username} {keyword}"
+                    params["q"] = search_query
+                    
+                    response = self.session.get(url, params=params)
+                    response.raise_for_status()
+                    items = response.json().get("items", [])
+                    
+                    for item in items:
+                        if self.is_script_file(item["name"]):
+                            repo_name = item["repository"]["name"]
+                            results.append({
+                                "repository": repo_name,
+                                "file_path": item["path"],
+                                "file_name": item["name"],
+                                "html_url": item["html_url"],
+                                "score": item.get("score", 0),
+                                "matched_keyword": keyword,
+                                "description": item["repository"].get("description", ""),
+                                "language": item["repository"].get("language", "Unknown")
+                            })
+                    
+                    if results:
+                        break
+            
+            return results[:20]  # Return top 20 results
+            
+        except requests.exceptions.RequestException as e:
+            import sys
+            print(f"Error in optimized search: {e}", file=sys.stderr)
+            return []
+    
 
-def analyze_script_functionality(content: str, file_path: str) -> str:
-    """
-    Analyze script content to describe main functionality and behavior.
-    
-    This function analyzes script content to identify and describe key functionality
-    such as database operations, threading, monitoring, file processing, etc.
-    
-    Args:
-        content (str): Script file content
-        file_path (str): File path for context
-    
-    Returns:
-        str: Formatted string describing script functionality with emojis and categories
-    """
-    description = []
-    content_lower = content.lower()
-    
-            # 파일명에서 힌트 추출 (현재는 사용하지 않음)
-        # filename = os.path.basename(file_path).lower()
-    
-    # 주석에서 설명 추출 (Python의 경우)
-    if file_path.endswith('.py'):
-        # docstring 추출
-        docstring_match = re.search(r'"""(.*?)"""', content, re.DOTALL)
-        if docstring_match:
-            docstring = docstring_match.group(1).strip()
-            if len(docstring) > 50:  # 의미있는 docstring인 경우
-                description.append(f"📝 **스크립트 설명 (개발자 주석)**:\n{docstring[:500]}...")
-    
-    # 주요 기능 패턴 분석
-    functionality = []
-    
-    # 데이터베이스 관련
-    if any(keyword in content_lower for keyword in ['select', 'insert', 'update', 'delete', 'create table']):
-        functionality.append("🗄️ **데이터베이스 작업**: SQL 쿼리 실행 (CRUD 작업)")
-    
-    if 'history list length' in content_lower or 'hll' in content_lower:
-        functionality.append("📊 **HLL 관리**: Aurora MySQL History List Length 제어")
-    
-    # 멀티스레딩/동시성
-    if any(keyword in content_lower for keyword in ['threading', 'thread', 'concurrent']):
-        functionality.append("⚡ **멀티스레딩**: 동시 작업 처리로 성능 향상")
-    
-    # 모니터링
-    if any(keyword in content_lower for keyword in ['monitor', 'metrics', 'cloudwatch']):
-        functionality.append("📈 **모니터링**: 시스템 메트릭 수집 및 추적")
-    
-    # 파일 처리
-    if any(keyword in content_lower for keyword in ['file', 'directory', 'path', 'os.path']):
-        functionality.append("📁 **파일 처리**: 파일 시스템 작업 및 관리")
-    
-    # 네트워크/API
-    if any(keyword in content_lower for keyword in ['requests', 'http', 'api', 'url']):
-        functionality.append("🌐 **네트워크 통신**: HTTP API 호출 및 데이터 교환")
-    
-    # 백업/복원
-    if any(keyword in content_lower for keyword in ['backup', 'restore', 'dump', 'export']):
-        functionality.append("💾 **백업/복원**: 데이터 백업 및 복원 작업")
-    
-    # 자동화
-    if any(keyword in content_lower for keyword in ['schedule', 'cron', 'automation', 'batch']):
-        functionality.append("🤖 **자동화**: 스케줄링 및 배치 작업")
-    
-    # 테스트/부하
-    if any(keyword in content_lower for keyword in ['test', 'load', 'stress', 'benchmark']):
-        functionality.append("🧪 **테스트**: 성능 테스트 및 부하 생성")
-    
-    # 설정/구성
-    if any(keyword in content_lower for keyword in ['config', 'setup', 'install', 'configure']):
-        functionality.append("⚙️ **설정 관리**: 시스템 구성 및 초기화")
-    
-    if functionality:
-        description.append("🎯 **주요 기능**:")
-        description.extend([f"   {func}" for func in functionality])
-    
-    # 실행 흐름 분석
-    execution_flow = []
-    
-    if 'if __name__ == "__main__"' in content:
-        execution_flow.append("▶️ **메인 실행부**: 스크립트 직접 실행 가능")
-    
-    if any(keyword in content_lower for keyword in ['while true', 'infinite', 'loop']):
-        execution_flow.append("🔄 **무한 루프**: 지속적인 작업 수행")
-    
-    if 'try:' in content and 'except' in content:
-        execution_flow.append("🛡️ **예외 처리**: 오류 상황 대응 로직 포함")
-    
-    if execution_flow:
-        description.append("🔧 **실행 특성**:")
-        description.extend([f"   {flow}" for flow in execution_flow])
-    
-    return '\n'.join(description) if description else ""
 
-def analyze_script_requirements(content: str, file_path: str) -> str:
-    """
-    Analyze script content to determine execution environment requirements.
-    
-    This function analyzes script content to identify required environments,
-    dependencies, and configurations needed to run the script.
-    
-    Args:
-        content (str): Script file content
-        file_path (str): File path for context
-    
-    Returns:
-        str: Formatted string describing script requirements with emojis and categories
-    """
-    requirements = []
-    
-    # 파일 확장자 기반 언어 감지
-    _, ext = os.path.splitext(file_path.lower())
-    
-    if ext == '.py':
-        requirements.append("🐍 **Python 환경** 필요")
-        
-        # Python 패키지 의존성 분석
-        python_packages = []
-        common_imports = {
-            'mysql.connector': 'MySQL 연결',
-            'pymysql': 'MySQL 연결',
-            'psycopg2': 'PostgreSQL 연결',
-            'boto3': 'AWS SDK',
-            'requests': 'HTTP 클라이언트',
-            'pandas': '데이터 분석',
-            'numpy': '수치 계산',
-            'flask': '웹 프레임워크',
-            'django': '웹 프레임워크',
-            'threading': '멀티스레딩 (내장)',
-            'multiprocessing': '멀티프로세싱 (내장)'
-        }
-        
-        for package, description in common_imports.items():
-            if f'import {package}' in content or f'from {package}' in content:
-                python_packages.append(f"  - `{package}`: {description}")
-        
-        if python_packages:
-            requirements.append("📦 **필요한 Python 패키지:**")
-            requirements.extend(python_packages)
-    
-    elif ext in ['.sh', '.bash']:
-        requirements.append("🐚 **Bash 셸 환경** 필요")
-    
-    elif ext in ['.js', '.ts']:
-        requirements.append("🟨 **Node.js 환경** 필요")
-    
-    # 데이터베이스 연결 감지
-    db_patterns = {
-        'mysql': ['mysql', 'aurora', 'rds'],
-        'postgresql': ['postgres', 'psql'],
-        'mongodb': ['mongo', 'mongodb'],
-        'redis': ['redis']
-    }
-    
-    content_lower = content.lower()
-    for db_type, patterns in db_patterns.items():
-        if any(pattern in content_lower for pattern in patterns):
-            requirements.append(f"🗄️ **{db_type.upper()} 데이터베이스** 접속 필요")
-            break
-    
-    # AWS 서비스 감지
-    aws_services = []
-    aws_patterns = {
-        'EC2': ['ec2', 'instance'],
-        'RDS': ['rds', 'aurora'],
-        'S3': ['s3', 'bucket'],
-        'Lambda': ['lambda'],
-        'CloudWatch': ['cloudwatch', 'metrics']
-    }
-    
-    for service, patterns in aws_patterns.items():
-        if any(pattern in content_lower for pattern in patterns):
-            aws_services.append(service)
-    
-    if aws_services:
-        requirements.append(f"☁️ **AWS 서비스**: {', '.join(aws_services)}")
-        requirements.append("🔑 **AWS 자격 증명** 필요")
-    
-    # 네트워크/포트 요구사항 감지
-    if 'port' in content_lower or ':3306' in content or ':5432' in content:
-        requirements.append("🌐 **네트워크 접속** 필요 (방화벽/보안그룹 설정)")
-    
-    # 고성능 요구사항 감지
-    performance_keywords = ['threading', 'multiprocessing', 'concurrent', 'parallel', 'load', 'stress']
-    if any(keyword in content_lower for keyword in performance_keywords):
-        requirements.append("⚡ **고성능 환경** 권장 (멀티코어 CPU)")
-    
-    return '\n'.join(requirements) if requirements else ""
 
-def extract_python_dependencies(content: str) -> List[str]:
-    """
-    Extract dependency package list from Python script by analyzing import statements.
-    
-    This function parses Python script content to identify imported packages,
-    excluding built-in modules to focus on external dependencies.
-    
-    Args:
-        content (str): Python script content
-    
-    Returns:
-        List[str]: List of external dependency package names
-    """
-    dependencies = []
-    
-    # import 패턴 매칭
-    import_patterns = [
-        r'import\s+([a-zA-Z_][a-zA-Z0-9_]*)',
-        r'from\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+import',
-    ]
-    
-    for pattern in import_patterns:
-        matches = re.findall(pattern, content)
-        dependencies.extend(matches)
-    
-    # 내장 모듈 제외
-    builtin_modules = {
-        'os', 'sys', 're', 'json', 'time', 'datetime', 'random', 'math',
-        'collections', 'itertools', 'functools', 'operator', 'pathlib',
-        'urllib', 'http', 'socket', 'threading', 'multiprocessing',
-        'subprocess', 'logging', 'argparse', 'configparser', 'csv',
-        'xml', 'html', 'email', 'base64', 'hashlib', 'hmac', 'secrets',
-        'uuid', 'pickle', 'shelve', 'sqlite3', 'gzip', 'zipfile', 'tarfile'
-    }
-    
-    # 외부 패키지만 필터링
-    external_deps = [dep for dep in set(dependencies) if dep not in builtin_modules]
-    
-    return sorted(external_deps)
+
+
 
 # Initialize the searcher
 searcher = GitHubSearcher(GITHUB_USERNAME, GITHUB_TOKEN)
@@ -540,9 +320,7 @@ CRITICAL WORKFLOW RULES - YOU MUST FOLLOW THESE EXACTLY:
      * "1번 서브넷 그룹 사용해줘" → Call configure_aws_environment(action="save_db_subnet_group", db_subnet_group_name="...")
      * "default로 해줘" → Call configure_aws_environment(action="save_db_subnet_group", db_subnet_group_name="default")
      * "test-cluster로 이름 정해줘" → Call configure_aws_environment(action="save_cluster_name", cluster_name="test-cluster")
-     * "db.t3.small로 해줘" → Call configure_aws_environment(action="save_instance_type", instance_type="db.t3.small")
-     * "저비용으로 해줘" → Call configure_aws_environment(action="save_instance_type", instance_type="db.t3.small")
-     * "고성능으로 해줘" → Call configure_aws_environment(action="save_instance_type", instance_type="db.r5.large")
+
    - CRITICAL: When user makes a selection, you MUST:
      1. Parse their selection (번호, 이름, 또는 특성)
      2. Find the corresponding resource info from the displayed list
@@ -694,18 +472,9 @@ def search_scripts(description: str) -> str:
             output += f"   🏷️ Language: {result['language']}\n"
             output += f"   🎯 Matched Keyword: {result['matched_keyword']}\n"
             
-            # Get script content and analyze
+            # Get script content for preview only
             content = searcher.get_file_content(result['repository'], result['file_path'])
             if content:
-                # Analyze functionality
-                functionality = analyze_script_functionality(content, result['file_path'])
-                requirements = analyze_script_requirements(content, result['file_path'])
-                
-                if functionality:
-                    output += f"   📋 **기능**: {functionality.split('\n')[0]}\n"
-                if requirements:
-                    output += f"   🔧 **요구사항**: {requirements.split('\n')[0]}\n"
-                    
                 # Show first few lines as preview
                 lines = content.split('\n')[:5]
                 preview = '\n'.join(lines)
@@ -817,11 +586,6 @@ def download_script(repository: str, file_path: str, branch: str = "main") -> st
         # Get file size for confirmation
         file_size = len(response.content)
         
-        # Analyze script functionality and requirements
-        script_content = response.content.decode('utf-8')
-        script_functionality = analyze_script_functionality(script_content, file_path)
-        script_requirements = analyze_script_requirements(script_content, file_path)
-        
         result = f"✅ Successfully downloaded script!\n\n" \
                 f"📁 Repository: {repository}\n" \
                 f"📄 Remote file: {file_path}\n" \
@@ -829,141 +593,6 @@ def download_script(repository: str, file_path: str, branch: str = "main") -> st
                 f"🌿 Branch: {branch}\n" \
                 f"📊 File size: {file_size:,} bytes\n" \
                 f"🔗 Source URL: {raw_url}\n\n"
-        
-        # Add script functionality description
-        if script_functionality:
-            result += f"## 📋 스크립트 기능 분석\n\n{script_functionality}\n\n"
-        
-        if script_requirements:
-            result += f"## 🔧 감지된 요구사항\n\n{script_requirements}\n\n"
-        
-        # 개선된 AWS 관련성 판단 및 환경 구성 제안
-        def analyze_aws_requirements(content: str, file_path: str) -> dict:
-            """Analyze script content to accurately determine AWS requirements.
-            
-            This function analyzes script content to detect AWS services, database types,
-            and environment requirements. It provides a confidence score and detailed
-            analysis of AWS-related functionality.
-            
-            Args:
-                content (str): Script file content
-                file_path (str): File path for context
-                
-            Returns:
-                dict: Analysis results containing:
-                     - is_aws_related (bool): Whether script uses AWS services
-                     - aws_services (list): List of detected AWS services
-                     - database_type (str): Type of database detected
-                     - environment_type (str): Type of AWS environment needed
-                     - confidence_score (int): Confidence score (0-100)
-            """
-            content_lower = content.lower()
-            analysis = {
-                'is_aws_related': False,
-                'aws_services': [],
-                'database_type': None,
-                'environment_type': 'none',
-                'confidence_score': 0
-            }
-            
-            # 1. AWS SDK 및 서비스 감지
-            aws_services = {
-                'boto3': ['boto3', 'aws-sdk'],
-                'aurora': ['aurora', 'rds', 'mysql', 'postgresql'],
-                'ec2': ['ec2', 'instance', 'ami'],
-                's3': ['s3', 'bucket', 'object'],
-                'lambda': ['lambda', 'serverless'],
-                'cloudwatch': ['cloudwatch', 'metrics', 'logs'],
-                'vpc': ['vpc', 'subnet', 'security-group'],
-                'iam': ['iam', 'role', 'policy'],
-                'sns': ['sns', 'notification'],
-                'sqs': ['sqs', 'queue']
-            }
-            
-            detected_services = []
-            for service, keywords in aws_services.items():
-                if any(keyword in content_lower for keyword in keywords):
-                    detected_services.append(service)
-            
-            # 2. 데이터베이스 타입 감지
-            db_patterns = {
-                'mysql': ['mysql', 'aurora-mysql', 'mariadb'],
-                'postgresql': ['postgres', 'postgresql', 'aurora-postgresql'],
-                'mongodb': ['mongo', 'mongodb'],
-                'redis': ['redis', 'elasticache'],
-                'dynamodb': ['dynamodb', 'dynamo']
-            }
-            
-            detected_db = None
-            for db_type, keywords in db_patterns.items():
-                if any(keyword in content_lower for keyword in keywords):
-                    detected_db = db_type
-                    break
-            
-            # 3. 환경 타입 분류
-            if detected_services:
-                if 'aurora' in detected_services or detected_db in ['mysql', 'postgresql']:
-                    analysis['environment_type'] = 'aurora_database'
-                elif 'ec2' in detected_services:
-                    analysis['environment_type'] = 'ec2_compute'
-                elif 'lambda' in detected_services:
-                    analysis['environment_type'] = 'serverless'
-                elif 's3' in detected_services:
-                    analysis['environment_type'] = 'storage'
-                else:
-                    analysis['environment_type'] = 'aws_general'
-            
-            # 4. 신뢰도 점수 계산
-            score = 0
-            if detected_services:
-                score += len(detected_services) * 10  # 서비스당 10점
-            if detected_db:
-                score += 20  # 데이터베이스 감지시 20점 추가
-            if 'boto3' in detected_services:
-                score += 30  # boto3 사용시 30점 추가
-            
-            # 5. 최종 판단
-            analysis['is_aws_related'] = score >= 20  # 20점 이상이면 AWS 관련
-            analysis['aws_services'] = detected_services
-            analysis['database_type'] = detected_db
-            analysis['confidence_score'] = min(score, 100)
-            
-            return analysis
-        
-        # AWS 요구사항 분석
-        aws_analysis = analyze_aws_requirements(script_content, file_path)
-        
-        if aws_analysis['is_aws_related']:
-            # AWS 관련 스크립트인 경우
-            result += "\n## 🚀 AWS 환경 구성 제안\n\n"
-            
-            # 환경 타입별 맞춤 제안
-            if aws_analysis['environment_type'] == 'aurora_database':
-                result += f"이 스크립트는 **Aurora {aws_analysis['database_type'].upper()}** 데이터베이스를 사용하므로 "
-                result += "테스트를 위해 Aurora 클러스터 환경이 필요합니다.\n\n"
-            elif aws_analysis['environment_type'] == 'ec2_compute':
-                result += "이 스크립트는 **EC2 인스턴스**를 사용하므로 "
-                result += "테스트를 위해 EC2 환경이 필요합니다.\n\n"
-            elif aws_analysis['environment_type'] == 'serverless':
-                result += "이 스크립트는 **AWS Lambda** 서버리스 서비스를 사용하므로 "
-                result += "테스트를 위해 Lambda 환경이 필요합니다.\n\n"
-            else:
-                result += "이 스크립트는 **AWS 서비스**를 사용하므로 "
-                result += "테스트를 위해 AWS 환경이 필요합니다.\n\n"
-            
-            # 감지된 서비스 정보
-            if aws_analysis['aws_services']:
-                result += f"**감지된 AWS 서비스**: {', '.join(aws_analysis['aws_services'])}\n"
-                result += f"**신뢰도**: {aws_analysis['confidence_score']}%\n\n"
-            
-            # 환경 타입별 추천
-            if aws_analysis['environment_type'] == 'aurora_database':
-                result += "💡 **추천**: Aurora 데이터베이스 환경을 구성하면 스크립트를 바로 테스트할 수 있습니다."
-            else:
-                result += "💡 **추천**: AWS 환경을 구성하면 스크립트를 바로 테스트할 수 있습니다."
-        else:
-            # 일반 스크립트인 경우
-            result += "\n**💡 팁**: 이 스크립트를 실행하려면 필요한 환경을 확인해 주세요."
         
         return result
         
@@ -1275,10 +904,6 @@ def setup_environment_guide(step: str = "start") -> str:
                         result += f"   - CIDR: {vpc['CidrBlock']}\n"
                         result += f"   - 상태: {vpc['State']}\n\n"
                     
-                    result += "### 🎯 다음 단계:\n\n"
-                    result += "위 목록에서 사용하고 싶은 VPC를 선택해 주세요.\n"
-                    result += "예: \"1번 VPC 사용해줘\", \"2번으로 해줘\", \"dk-vpc 사용하고 싶어\" 등\n\n"
-                    result += "⚠️ **권장사항**: 기본 VPC보다는 전용 VPC 사용을 권장합니다.\n\n"
                     
                 else:
                     result += "❌ 사용 가능한 VPC가 없습니다.\n\n"
@@ -1364,7 +989,7 @@ def setup_environment_guide(step: str = "start") -> str:
                         
                         result += "### 🎯 다음 단계:\n\n"
                         result += "위 목록에서 사용하고 싶은 보안 그룹을 선택해 주세요.\n"
-                        result += "예: \"1번 보안 그룹 사용해줘\", \"2번으로 해줘\" 등\n\n"
+
                     else:
                         result += f"❌ VPC `{selected_vpc_id}`에 해당하는 보안 그룹이 없습니다.\n\n"
                 else:
@@ -1407,7 +1032,7 @@ def setup_environment_guide(step: str = "start") -> str:
                         result += f"   - 설명: {sg['Description']}\n\n"
                     
                     result += "원하는 DB 서브넷 그룹을 선택해 주세요.\n"
-                    result += "예: \"1번 서브넷 그룹 사용해줘\", \"default로 해줘\" 등\n\n"
+
                 else:
                     result += "❌ DB 서브넷 그룹이 없습니다.\n\n"
             else:
@@ -1482,14 +1107,13 @@ def setup_environment_guide(step: str = "start") -> str:
             result += f"❌ 조회 중 오류: {str(e)}\n\n"
         
         result += "파라미터 그룹명을 입력해 주세요.\n"
-        result += "예: \"test-aurora-params로 해줘\" 등\n\n"
-        
+
         return result
     
     elif step == "instance":
         result = "## 💻 6단계: 인스턴스 타입 선택\n\n"
         result += "원하는 인스턴스 타입을 입력해 주세요.\n"
-        result += "예: \"db.t3.small로 해줘\", \"저비용으로 해줘\" 등\n\n"
+
         
         return result
     
@@ -1583,6 +1207,8 @@ def setup_test_environment() -> str:
     result += f"- ⚙️ 파라미터 그룹: `{param_group_display}`\n\n"
     
     return result
+
+
 
 def main():
     """Main entry point for the MCP server.
