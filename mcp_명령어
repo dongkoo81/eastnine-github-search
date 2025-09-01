@@ -6,5 +6,5 @@ mcp dev src/eastnine_github_search/server.py
 
 2. mcp 서버 시작 
 
-uv mcp run eastnine-github-search
+uv run mcp run eastnine-github-search
 
